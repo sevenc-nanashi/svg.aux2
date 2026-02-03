@@ -222,7 +222,7 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
             resvg::render(&rtree, transform, &mut buf.as_mut());
 
             // Extract the clipped region if clipping is enabled
-            let final_buffer = if final_width > 0
+            let (final_buffer, output_width, output_height) = if final_width > 0
                 && final_height > 0
                 && (config.clip_top > 0
                     || config.clip_bottom > 0
@@ -255,23 +255,16 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
                     final_height
                 );
 
-                clipped_buf
+                (clipped_buf, final_width, final_height)
             } else {
-                buf.data().to_vec()
+                // No clipping applied, use the full rendered buffer
+                (buf.data().to_vec(), render_width, render_height)
             };
 
             *cache_entry.value_mut() = SvgCacheEntry {
                 buffer: final_buffer,
-                width: if final_width > 0 {
-                    final_width
-                } else {
-                    render_width
-                },
-                height: if final_height > 0 {
-                    final_height
-                } else {
-                    render_height
-                },
+                width: output_width,
+                height: output_height,
                 ..cache_key
             };
         }
