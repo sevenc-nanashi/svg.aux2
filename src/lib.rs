@@ -194,10 +194,10 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
             // Apply clipping
             let clipped_width = config
                 .width
-                .saturating_sub(config.clip_left + config.clip_right);
+                .saturating_sub(config.clip_left.saturating_add(config.clip_right));
             let clipped_height = config
                 .height
-                .saturating_sub(config.clip_top + config.clip_bottom);
+                .saturating_sub(config.clip_top.saturating_add(config.clip_bottom));
 
             let clipped_buffer = if clipped_width > 0
                 && clipped_height > 0
@@ -207,8 +207,10 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
                     || config.clip_right > 0)
             {
                 // Create clipped buffer
-                let mut clipped_buf =
-                    Vec::with_capacity((clipped_width * clipped_height * 4) as usize);
+                let capacity = (clipped_width as usize)
+                    .saturating_mul(clipped_height as usize)
+                    .saturating_mul(4);
+                let mut clipped_buf = Vec::with_capacity(capacity);
                 let src_data = buf.data();
 
                 for y in config.clip_top..(config.clip_top + clipped_height) {
