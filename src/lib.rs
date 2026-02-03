@@ -39,6 +39,7 @@ struct SvgCacheEntry {
     clip_bottom: u32,
     clip_left: u32,
     clip_right: u32,
+    clip_as_final_size: bool,
     #[educe(Debug(ignore), PartialEq(ignore))]
     buffer: Vec<u8>,
 }
@@ -71,6 +72,8 @@ struct SvgConfig {
         clip_left: u32,
         #[track(name = "右", range=0..=8192, default = 0, step = 1.0)]
         clip_right: u32,
+        #[check(name = "クリッピング後のサイズを指定", default = false)]
+        clip_as_final_size: bool,
     },
 }
 
@@ -120,11 +123,12 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
             clip_bottom: config.clip_bottom,
             clip_left: config.clip_left,
             clip_right: config.clip_right,
+            clip_as_final_size: config.clip_as_final_size,
             buffer: Vec::new(),
         };
         if *cache_entry.value() != cache_key {
             log::info!(
-                "Rendering SVG file '{}' with color rgb({},{},{}) at size {}x{}, clipping (t:{}, b:{}, l:{}, r:{})",
+                "Rendering SVG file '{}' with color rgb({},{},{}) at size {}x{}, clipping (t:{}, b:{}, l:{}, r:{}, as_final:{})",
                 svg_path.display(),
                 color.0,
                 color.1,
@@ -134,17 +138,43 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
                 config.clip_top,
                 config.clip_bottom,
                 config.clip_left,
-                config.clip_right
+                config.clip_right,
+                config.clip_as_final_size
             );
+
+            // Calculate actual render dimensions based on clipping mode
+            let (render_width, render_height, final_width, final_height) =
+                if config.clip_as_final_size {
+                    // Width/height are the final clipped size, so we need to add clipping margins
+                    let render_w = config
+                        .width
+                        .saturating_add(config.clip_left.saturating_add(config.clip_right));
+                    let render_h = config
+                        .height
+                        .saturating_add(config.clip_top.saturating_add(config.clip_bottom));
+                    (render_w, render_h, config.width, config.height)
+                } else {
+                    // Width/height are the render size, clipping reduces the output
+                    let final_w = config
+                        .width
+                        .saturating_sub(config.clip_left.saturating_add(config.clip_right));
+                    let final_h = config
+                        .height
+                        .saturating_sub(config.clip_top.saturating_add(config.clip_bottom));
+                    (config.width, config.height, final_w, final_h)
+                };
+
             let svg_data = std::fs::read(svg_path).map_err(|e| {
                 anyhow::anyhow!("Failed to read SVG file '{}': {}", svg_path.display(), e)
             })?;
+
+            // Render SVG at the full size (including margins for clipping)
             let mut buf =
-                resvg::tiny_skia::Pixmap::new(config.width, config.height).ok_or_else(|| {
+                resvg::tiny_skia::Pixmap::new(render_width, render_height).ok_or_else(|| {
                     anyhow::anyhow!(
                         "Failed to create pixmap with size {}x{}",
-                        config.width,
-                        config.height
+                        render_width,
+                        render_height
                     )
                 })?;
             let opt = resvg::usvg::Options {
@@ -158,8 +188,8 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
                 anyhow::anyhow!("Failed to parse SVG file '{}': {}", svg_path.display(), e)
             })?;
             let svg_size = rtree.size();
-            let target_width = config.width as f32;
-            let target_height = config.height as f32;
+            let target_width = render_width as f32;
+            let target_height = render_height as f32;
             let scale_x = target_width / svg_size.width();
             let scale_y = target_height / svg_size.height();
             let (transform, scaled_width, scaled_height) = if config.maintain_aspect_ratio {
@@ -182,7 +212,7 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
                 )
             };
             log::info!(
-                "Scaled SVG to {}x{} (target {}x{}, maintain_aspect_ratio={})",
+                "Scaled SVG to {}x{} (render target {}x{}, maintain_aspect_ratio={})",
                 scaled_width,
                 scaled_height,
                 target_width,
@@ -191,45 +221,38 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
             );
             resvg::render(&rtree, transform, &mut buf.as_mut());
 
-            // Apply clipping
-            let clipped_width = config
-                .width
-                .saturating_sub(config.clip_left.saturating_add(config.clip_right));
-            let clipped_height = config
-                .height
-                .saturating_sub(config.clip_top.saturating_add(config.clip_bottom));
-
-            let clipped_buffer = if clipped_width > 0
-                && clipped_height > 0
+            // Extract the clipped region if clipping is enabled
+            let final_buffer = if final_width > 0
+                && final_height > 0
                 && (config.clip_top > 0
                     || config.clip_bottom > 0
                     || config.clip_left > 0
                     || config.clip_right > 0)
             {
-                // Create clipped buffer
-                let capacity = (clipped_width as usize)
-                    .saturating_mul(clipped_height as usize)
+                // Create clipped buffer by extracting the visible region
+                let capacity = (final_width as usize)
+                    .saturating_mul(final_height as usize)
                     .saturating_mul(4);
                 let mut clipped_buf = Vec::with_capacity(capacity);
                 let src_data = buf.data();
 
-                for y in config.clip_top..(config.clip_top + clipped_height) {
-                    if y >= config.height {
+                for y in config.clip_top..(config.clip_top + final_height) {
+                    if y >= render_height {
                         break;
                     }
-                    let src_row_start = (y * config.width + config.clip_left) as usize * 4;
-                    let src_row_end = src_row_start + (clipped_width as usize * 4);
+                    let src_row_start = (y * render_width + config.clip_left) as usize * 4;
+                    let src_row_end = src_row_start + (final_width as usize * 4);
                     if src_row_end <= src_data.len() {
                         clipped_buf.extend_from_slice(&src_data[src_row_start..src_row_end]);
                     }
                 }
 
                 log::info!(
-                    "Applied clipping: original {}x{} -> clipped {}x{}",
-                    config.width,
-                    config.height,
-                    clipped_width,
-                    clipped_height
+                    "Applied clipping: render {}x{} -> final {}x{}",
+                    render_width,
+                    render_height,
+                    final_width,
+                    final_height
                 );
 
                 clipped_buf
@@ -238,16 +261,16 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
             };
 
             *cache_entry.value_mut() = SvgCacheEntry {
-                buffer: clipped_buffer,
-                width: if clipped_width > 0 {
-                    clipped_width
+                buffer: final_buffer,
+                width: if final_width > 0 {
+                    final_width
                 } else {
-                    config.width
+                    render_width
                 },
-                height: if clipped_height > 0 {
-                    clipped_height
+                height: if final_height > 0 {
+                    final_height
                 } else {
-                    config.height
+                    render_height
                 },
                 ..cache_key
             };
