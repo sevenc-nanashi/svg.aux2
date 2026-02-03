@@ -35,6 +35,10 @@ struct SvgCacheEntry {
     width: u32,
     height: u32,
     maintain_aspect_ratio: bool,
+    clip_top: u32,
+    clip_bottom: u32,
+    clip_left: u32,
+    clip_right: u32,
     #[educe(Debug(ignore), PartialEq(ignore))]
     buffer: Vec<u8>,
 }
@@ -57,6 +61,17 @@ struct SvgConfig {
     svg_file: Option<std::path::PathBuf>,
     #[color(name = "色", default = 0xffffff)]
     color: aviutl2::filter::FilterConfigColorValue,
+    #[group(name = "クリッピング", opened = true)]
+    clipping: group! {
+        #[track(name = "上", range=0..=8192, default = 0, step = 1.0)]
+        clip_top: u32,
+        #[track(name = "下", range=0..=8192, default = 0, step = 1.0)]
+        clip_bottom: u32,
+        #[track(name = "左", range=0..=8192, default = 0, step = 1.0)]
+        clip_left: u32,
+        #[track(name = "右", range=0..=8192, default = 0, step = 1.0)]
+        clip_right: u32,
+    },
 }
 
 impl aviutl2::filter::FilterPlugin for SvgFilter {
@@ -101,17 +116,25 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
             width: config.width,
             height: config.height,
             maintain_aspect_ratio: config.maintain_aspect_ratio,
+            clip_top: config.clip_top,
+            clip_bottom: config.clip_bottom,
+            clip_left: config.clip_left,
+            clip_right: config.clip_right,
             buffer: Vec::new(),
         };
         if *cache_entry.value() != cache_key {
             log::info!(
-                "Rendering SVG file '{}' with color rgb({},{},{}) at size {}x{}",
+                "Rendering SVG file '{}' with color rgb({},{},{}) at size {}x{}, clipping (t:{}, b:{}, l:{}, r:{})",
                 svg_path.display(),
                 color.0,
                 color.1,
                 color.2,
                 config.width,
-                config.height
+                config.height,
+                config.clip_top,
+                config.clip_bottom,
+                config.clip_left,
+                config.clip_right
             );
             let svg_data = std::fs::read(svg_path).map_err(|e| {
                 anyhow::anyhow!("Failed to read SVG file '{}': {}", svg_path.display(), e)
@@ -167,8 +190,46 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
                 config.maintain_aspect_ratio
             );
             resvg::render(&rtree, transform, &mut buf.as_mut());
+            
+            // Apply clipping
+            let clipped_width = config.width.saturating_sub(config.clip_left + config.clip_right);
+            let clipped_height = config.height.saturating_sub(config.clip_top + config.clip_bottom);
+            
+            let clipped_buffer = if clipped_width > 0 && clipped_height > 0 && 
+                                   (config.clip_top > 0 || config.clip_bottom > 0 || 
+                                    config.clip_left > 0 || config.clip_right > 0) {
+                // Create clipped buffer
+                let mut clipped_buf = Vec::with_capacity((clipped_width * clipped_height * 4) as usize);
+                let src_data = buf.data();
+                
+                for y in config.clip_top..(config.clip_top + clipped_height) {
+                    if y >= config.height {
+                        break;
+                    }
+                    let src_row_start = (y * config.width + config.clip_left) as usize * 4;
+                    let src_row_end = src_row_start + (clipped_width as usize * 4);
+                    if src_row_end <= src_data.len() {
+                        clipped_buf.extend_from_slice(&src_data[src_row_start..src_row_end]);
+                    }
+                }
+                
+                log::info!(
+                    "Applied clipping: original {}x{} -> clipped {}x{}",
+                    config.width,
+                    config.height,
+                    clipped_width,
+                    clipped_height
+                );
+                
+                clipped_buf
+            } else {
+                buf.data().to_vec()
+            };
+            
             *cache_entry.value_mut() = SvgCacheEntry {
-                buffer: buf.data().to_vec(),
+                buffer: clipped_buffer,
+                width: if clipped_width > 0 { clipped_width } else { config.width },
+                height: if clipped_height > 0 { clipped_height } else { config.height },
                 ..cache_key
             };
         }
