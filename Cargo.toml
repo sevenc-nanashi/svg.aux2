@@ -1,0 +1,13 @@
+[package]
+name = "svg-aux2"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aviutl2 = "0.15.0"
+dashmap = "6.1.0"
+educe = "0.6.0"
+resvg = "0.46.0"

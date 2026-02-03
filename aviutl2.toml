@@ -1,0 +1,26 @@
+#:schema ./.aviutl2-cli/aviutl2.schema.json
+
+# 設定ファイルについては https://github.com/sevenc-nanashi/aviutl2-cli を参照してください。
+[project]
+name = "svg-aux2"
+version = "0.1.0"
+
+[artifacts."svg.aux2"]
+enabled = true
+destination = "Plugin/svg.aux2"
+
+[artifacts."svg.aux2".profiles.debug]
+build = "cargo build"
+source = "target/debug/svg_aux2.dll"
+enabled = true
+
+[artifacts."svg.aux2".profiles.release]
+build = ["cargo build --release"]
+source = "target/release/svg_aux2.dll"
+enabled = true
+
+[development]
+aviutl2_version = "2.00beta31"
+
+[release]
+prebuild = ["cargo about generate ./about.hbs -o ./release/package.txt"]
