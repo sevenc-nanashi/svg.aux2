@@ -19,8 +19,21 @@ build = ["cargo build --release"]
 source = "target/release/svg_aux2.dll"
 enabled = true
 
+[artifacts."English.aul2"]
+enabled = false
+source = "https://raw.githubusercontent.com/aviutl2/aviutl2_community_translation/refs/heads/main/locales/community_en.aul2"
+destination = "Language/English.aul2"
+profiles = { debug = { enabled = true } }
+
+[artifacts."English.svg.aul2"]
+source = "./i18n/English.svg.aul2"
+destination = "Language/English.svg.aul2"
+
 [development]
 aviutl2_version = "2.00beta31"
 
 [release]
 prebuild = ["cargo about generate ./about.hbs -o ./release/package.txt"]
+package_template = "./release/package.txt"
+
+[preview]

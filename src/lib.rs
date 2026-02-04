@@ -1,5 +1,5 @@
 use aviutl2::{
-    anyhow::{self, Context},
+    anyhow,
     filter::{FilterConfigItemSliceExt, FilterConfigItems},
     log,
 };
