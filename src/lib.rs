@@ -1,5 +1,5 @@
 use aviutl2::{
-    anyhow,
+    anyhow::{self, Context},
     filter::{FilterConfigItemSliceExt, FilterConfigItems},
     log,
 };
@@ -35,6 +35,7 @@ struct SvgCacheEntry {
     width: u32,
     height: u32,
     maintain_aspect_ratio: bool,
+    clipping: (u32, u32, u32, u32),
     #[educe(Debug(ignore), PartialEq(ignore))]
     buffer: Vec<u8>,
 }
@@ -57,12 +58,27 @@ struct SvgConfig {
     svg_file: Option<std::path::PathBuf>,
     #[color(name = "色", default = 0xffffff)]
     color: aviutl2::filter::FilterConfigColorValue,
+    #[group(name = "クリッピング", opened = false)]
+    clipping: group! {
+        #[track(name = "左", range = 0..=8192, default = 0, step = 1.0)]
+        clip_left: u32,
+        #[track(name = "上", range = 0..=8192, default = 0, step = 1.0)]
+        clip_top: u32,
+        #[track(name = "右", range = 0..=8192, default = 0, step = 1.0)]
+        clip_right: u32,
+        #[track(name = "下", range = 0..=8192, default = 0, step = 1.0)]
+        clip_bottom: u32,
+    },
 }
 
 impl aviutl2::filter::FilterPlugin for SvgFilter {
     fn new(_info: aviutl2::AviUtl2Info) -> aviutl2::AnyResult<Self> {
         aviutl2::logger::LogBuilder::new()
-            .filter_level(aviutl2::logger::LevelFilter::Info)
+            .filter_level(if cfg!(debug_assertions) {
+                aviutl2::logger::LevelFilter::Debug
+            } else {
+                aviutl2::logger::LevelFilter::Info
+            })
             .init();
         Ok(Self {})
     }
@@ -101,6 +117,12 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
             width: config.width,
             height: config.height,
             maintain_aspect_ratio: config.maintain_aspect_ratio,
+            clipping: (
+                config.clip_left,
+                config.clip_top,
+                config.clip_right,
+                config.clip_bottom,
+            ),
             buffer: Vec::new(),
         };
         if *cache_entry.value() != cache_key {
@@ -113,17 +135,9 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
                 config.width,
                 config.height
             );
-            let svg_data = std::fs::read(svg_path).map_err(|e| {
+            let svg_data = std::fs::read_to_string(svg_path).map_err(|e| {
                 anyhow::anyhow!("Failed to read SVG file '{}': {}", svg_path.display(), e)
             })?;
-            let mut buf =
-                resvg::tiny_skia::Pixmap::new(config.width, config.height).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Failed to create pixmap with size {}x{}",
-                        config.width,
-                        config.height
-                    )
-                })?;
             let opt = resvg::usvg::Options {
                 style_sheet: Some(format!(
                     "* {{ color: rgb({},{},{}); }}",
@@ -131,46 +145,91 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
                 )),
                 ..Default::default()
             };
-            let rtree = resvg::usvg::Tree::from_data(&svg_data, &opt).map_err(|e| {
-                anyhow::anyhow!("Failed to parse SVG file '{}': {}", svg_path.display(), e)
-            })?;
-            let svg_size = rtree.size();
-            let target_width = config.width as f32;
-            let target_height = config.height as f32;
-            let scale_x = target_width / svg_size.width();
-            let scale_y = target_height / svg_size.height();
-            let (transform, scaled_width, scaled_height) = if config.maintain_aspect_ratio {
-                let scale = scale_x.min(scale_y);
-                let scaled_width = svg_size.width() * scale;
-                let scaled_height = svg_size.height() * scale;
-                let translate_x = (target_width - scaled_width) * 0.5;
-                let translate_y = (target_height - scaled_height) * 0.5;
-                (
-                    resvg::tiny_skia::Transform::from_scale(scale, scale)
-                        .post_translate(translate_x, translate_y),
-                    scaled_width,
-                    scaled_height,
+            let rtree = resvg::usvg::Tree::from_str(&svg_data, &opt).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to create SVG tree from file '{}': {}",
+                    svg_path.display(),
+                    e
                 )
+            })?;
+            let (clipped_width, clipped_height) = {
+                let size = rtree.size();
+                let clipped_width =
+                    (size.width() as u32).saturating_sub(config.clip_left + config.clip_right);
+                let clipped_height =
+                    (size.height() as u32).saturating_sub(config.clip_top + config.clip_bottom);
+                (clipped_width, clipped_height)
+            };
+            let (scale_x, scale_y) = if config.maintain_aspect_ratio {
+                let scale_x = config.width as f32 / clipped_width as f32;
+                let scale_y = config.height as f32 / clipped_height as f32;
+                let scale = scale_x.min(scale_y);
+                (scale, scale)
             } else {
                 (
-                    resvg::tiny_skia::Transform::from_scale(scale_x, scale_y),
-                    target_width,
-                    target_height,
+                    config.width as f32 / clipped_width as f32,
+                    config.height as f32 / clipped_height as f32,
                 )
             };
-            log::info!(
-                "Scaled SVG to {}x{} (target {}x{}, maintain_aspect_ratio={})",
-                scaled_width,
-                scaled_height,
-                target_width,
-                target_height,
-                config.maintain_aspect_ratio
+            log::debug!(
+                "Clipped SVG size: {}x{}, scale: {}x{}",
+                clipped_width,
+                clipped_height,
+                scale_x,
+                scale_y
             );
+            let canvas_width = (clipped_width as f32 * scale_x).ceil() as u32;
+            let canvas_height = (clipped_height as f32 * scale_y).ceil() as u32;
+            if canvas_width == 0 || canvas_height == 0 {
+                return Err(anyhow::anyhow!(
+                    "Resulting SVG size is zero ({}x{})",
+                    canvas_width,
+                    canvas_height
+                ));
+            }
+            log::debug!("Canvas size: {}x{}", canvas_width, canvas_height);
+            let mut buf =
+                resvg::tiny_skia::Pixmap::new(canvas_width, canvas_height).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Failed to create pixmap with size {}x{}",
+                        canvas_width,
+                        canvas_height
+                    )
+                })?;
+            let transform = resvg::tiny_skia::Transform::from_scale(scale_x, scale_y)
+                .pre_translate(-(config.clip_left as f32), -(config.clip_top as f32));
             resvg::render(&rtree, transform, &mut buf.as_mut());
-            *cache_entry.value_mut() = SvgCacheEntry {
-                buffer: buf.data().to_vec(),
-                ..cache_key
-            };
+            *cache_entry.value_mut() =
+                if config.width == buf.width() && config.height == buf.height() {
+                    SvgCacheEntry {
+                        buffer: buf.data().to_vec(),
+                        ..cache_key
+                    }
+                } else {
+                    let mut final_buf = resvg::tiny_skia::Pixmap::new(config.width, config.height)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Failed to create final pixmap with size {}x{}",
+                                config.width,
+                                config.height
+                            )
+                        })?;
+                    final_buf.fill(resvg::tiny_skia::Color::from_rgba8(0, 0, 0, 0));
+                    let left = ((config.width as i32 - buf.width() as i32) / 2).max(0) as u32;
+                    let top = ((config.height as i32 - buf.height() as i32) / 2).max(0) as u32;
+                    final_buf.draw_pixmap(
+                        left as i32,
+                        top as i32,
+                        buf.as_ref(),
+                        &resvg::tiny_skia::PixmapPaint::default(),
+                        Default::default(),
+                        None,
+                    );
+                    SvgCacheEntry {
+                        buffer: final_buf.data().to_vec(),
+                        ..cache_key
+                    }
+                };
         }
 
         let cache_entry = cache_entry.value();
