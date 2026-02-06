@@ -2,7 +2,7 @@
 SVG=SVG
 幅=Width
 高さ=Height
-アスペクト比の維持=Maintain Aspect Ratio
+アスペクト比の維持=Keep Aspect Ratio
 ファイル=File
 色=Color
 クリッピング=Clipping

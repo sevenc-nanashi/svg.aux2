@@ -43,6 +43,13 @@ struct SvgCacheEntry {
 static SVG_CACHES: std::sync::LazyLock<dashmap::DashMap<i64, SvgCacheEntry>> =
     std::sync::LazyLock::new(dashmap::DashMap::new);
 
+static FONT_DB: std::sync::LazyLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
+    std::sync::LazyLock::new(|| {
+        let mut db = resvg::usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        std::sync::Arc::new(db)
+    });
+
 #[aviutl2::plugin(FilterPlugin)]
 struct SvgFilter {}
 
@@ -143,6 +150,7 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
                     "* {{ color: rgb({},{},{}); }}",
                     color.0, color.1, color.2
                 )),
+                fontdb: std::sync::Arc::clone(&FONT_DB),
                 ..Default::default()
             };
             let rtree = resvg::usvg::Tree::from_str(&svg_data, &opt).map_err(|e| {
