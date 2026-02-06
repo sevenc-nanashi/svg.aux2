@@ -1,0 +1,19 @@
+# svg.aux2
+
+[English](README.en.md) | [日本語](README.md)
+
+A custom object for loading SVG files in AviUtl2.
+
+> [!TIP]
+> This plugin re-renders the SVG every time the width and height parameters change.
+> If you plan to animate resizing the SVG, it is recommended to fix the width and height, and use other filter effects for scaling.
+
+## Installation
+
+Download `svg-aux2-v<version>.au2pkg.zip` from [Releases](https://github.com/sevenc-nanashi/svg.aux2/releases/latest), and drag-and-drop it into the AviUtl2 preview.
+
+Alternatively, you can also install it from [AviUtl2 Catalog.](aviutl2-catalog://package/sevenc-nanashi.svg-aux2)
+
+## License
+
+Released under the MIT License.
