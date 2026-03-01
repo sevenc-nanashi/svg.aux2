@@ -7,7 +7,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-aviutl2 = "0.15.0"
+aviutl2 = "0.20.1"
 dashmap = "6.1.0"
 educe = "0.6.0"
-resvg = "0.46.0"
+resvg = "0.47.0"

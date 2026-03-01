@@ -1,7 +1,7 @@
 use aviutl2::{
     anyhow,
     filter::{FilterConfigItemSliceExt, FilterConfigItems},
-    log,
+    tracing,
 };
 
 #[aviutl2::plugin(GenericPlugin)]
@@ -16,12 +16,22 @@ impl aviutl2::generic::GenericPlugin for SvgAux2 {
         })
     }
 
+    fn plugin_info(&self) -> aviutl2::generic::GenericPluginTable {
+        aviutl2::generic::GenericPluginTable {
+            name: "svg.aux2".to_string(),
+            information: format!(
+                "Render SVG files as filter objects / v{} / https://github.com/sevenc-nanashi/svg.aux2",
+                env!("CARGO_PKG_VERSION")
+            ),
+        }
+    }
+
     fn register(&mut self, registry: &mut aviutl2::generic::HostAppHandle) {
         registry.register_filter_plugin(&self.filter);
     }
 
     fn on_clear_cache(&mut self, _edit_section: &aviutl2::generic::EditSection) {
-        log::info!("Clearing SVG caches");
+        tracing::info!("Clearing SVG caches");
         SVG_CACHES.clear();
     }
 }
@@ -80,12 +90,14 @@ struct SvgConfig {
 
 impl aviutl2::filter::FilterPlugin for SvgFilter {
     fn new(_info: aviutl2::AviUtl2Info) -> aviutl2::AnyResult<Self> {
-        aviutl2::logger::LogBuilder::new()
-            .filter_level(if cfg!(debug_assertions) {
-                aviutl2::logger::LevelFilter::Debug
+        aviutl2::tracing_subscriber::fmt()
+            .with_max_level(if cfg!(debug_assertions) {
+                tracing::Level::DEBUG
             } else {
-                aviutl2::logger::LevelFilter::Info
+                tracing::Level::INFO
             })
+            .event_format(aviutl2::logger::AviUtl2Formatter)
+            .with_writer(aviutl2::logger::AviUtl2LogWriter)
             .init();
         Ok(Self {})
     }
@@ -133,7 +145,7 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
             buffer: Vec::new(),
         };
         if *cache_entry.value() != cache_key {
-            log::info!(
+            tracing::info!(
                 "Rendering SVG file '{}' with color rgb({},{},{}) at size {}x{}",
                 svg_path.display(),
                 color.0,
@@ -179,7 +191,7 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
                     config.height as f32 / clipped_height as f32,
                 )
             };
-            log::debug!(
+            tracing::debug!(
                 "Clipped SVG size: {}x{}, scale: {}x{}",
                 clipped_width,
                 clipped_height,
@@ -195,7 +207,7 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
                     canvas_height
                 ));
             }
-            log::debug!("Canvas size: {}x{}", canvas_width, canvas_height);
+            tracing::debug!("Canvas size: {}x{}", canvas_width, canvas_height);
             let mut buf =
                 resvg::tiny_skia::Pixmap::new(canvas_width, canvas_height).ok_or_else(|| {
                     anyhow::anyhow!(
