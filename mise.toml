@@ -1,3 +1,7 @@
+[plugins]
+cargo-prebuilt = "https://github.com/sevenc-nanashi/mise-cargo-prebuilt"
+
 [tools]
-"cargo:cargo-about" = "latest"
 "github:sevenc-nanashi/aviutl2-cli" = { version = "0.7.0", bin = "au2.exe" }
+"github:EmbarkStudios/cargo-about" = { version = "latest" }
+"cargo-prebuilt:cargo-edit" = "latest"
