@@ -1,5 +1,5 @@
 use aviutl2::{
-    anyhow,
+    anyhow::{self, Context},
     filter::{FilterConfigItemSliceExt, FilterConfigItems},
     tracing,
 };
@@ -8,6 +8,8 @@ use aviutl2::{
 struct SvgAux2 {
     filter: aviutl2::generic::SubPlugin<SvgFilter>,
 }
+
+static EDIT_HANDLE: aviutl2::generic::GlobalEditHandle = aviutl2::generic::GlobalEditHandle::new();
 
 impl aviutl2::generic::GenericPlugin for SvgAux2 {
     fn new(info: aviutl2::AviUtl2Info) -> aviutl2::AnyResult<Self> {
@@ -28,6 +30,51 @@ impl aviutl2::generic::GenericPlugin for SvgAux2 {
 
     fn register(&mut self, registry: &mut aviutl2::generic::HostAppHandle) {
         registry.register_filter_plugin(&self.filter);
+        let filters = aviutl2::file_filters! {
+            "SVG" => ["svg"]
+        };
+        EDIT_HANDLE.init(registry.create_edit_handle());
+        registry.register_file_drop_handler("svg.aux2", &filters, |file| {
+            let res = EDIT_HANDLE
+                .call_edit_section(|e| {
+                    let position = e.get_mouse_layer_frame()?.unwrap_or({
+                        aviutl2::generic::LayerFrameData {
+                            layer: e.info.layer,
+                            frame: e.info.frame,
+                        }
+                    });
+
+                    let mut object_alias = aviutl2::alias::Table::new();
+                    let mut object = aviutl2::alias::Table::new();
+                    object.insert_value(
+                        "name",
+                        file.file_name().and_then(|n| n.to_str()).unwrap_or("SVG"),
+                    );
+                    let mut object_0 = aviutl2::alias::Table::new();
+                    object_0.insert_value("effect.name", "SVG");
+                    object_0.insert_value(
+                        "ファイル",
+                        file.to_str()
+                            .context("Failed to convert file path to string for object alias")?,
+                    );
+                    object.insert_table("0", object_0);
+                    object_alias.insert_table("Object", object);
+
+                    e.create_object_from_alias(
+                        &object_alias.to_string(),
+                        position.layer,
+                        position.frame,
+                        0,
+                    )?;
+
+                    anyhow::Ok(())
+                })
+                .map_err(anyhow::Error::from)
+                .flatten();
+            if let Err(e) = res {
+                tracing::error!("Failed to handle file drop: {}", e);
+            }
+        })
     }
 
     fn on_clear_cache(&mut self, _edit_section: &aviutl2::generic::EditSection) {

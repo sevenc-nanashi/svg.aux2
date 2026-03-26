@@ -31,7 +31,7 @@ source = "./i18n/English.svg.aul2"
 destination = "Language/English.svg.aul2"
 
 [development]
-aviutl2_version = "2.00beta31"
+aviutl2_version = "latest"
 
 [release]
 prebuild = ["cargo about generate ./about.hbs -o ./release/package.txt"]
