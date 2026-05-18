@@ -99,7 +99,7 @@ impl std::fmt::Debug for SvgSource {
             SvgSource::File(path) => f.debug_tuple("File").field(path).finish(),
             SvgSource::Inline(data) => f
                 .debug_tuple("Inline")
-                .field(NumBytes(data.len()))
+                .field(&NumBytes(data.len()))
                 .finish(),
         }
     }
