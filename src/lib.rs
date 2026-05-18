@@ -76,29 +76,45 @@ impl aviutl2::generic::GenericPlugin for SvgAux2 {
             }
         })
     }
+}
 
-    fn on_clear_cache(&mut self, _edit_section: &aviutl2::generic::EditSection) {
-        tracing::info!("Clearing SVG caches");
-        SVG_CACHES.clear();
+#[derive(Clone, Hash)]
+enum SvgSource {
+    File(std::path::PathBuf),
+    Inline(String),
+}
+impl std::fmt::Debug for SvgSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        struct NumBytes(usize);
+        impl std::fmt::Debug for NumBytes {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                if self.0 < 1024 {
+                    write!(f, "{} bytes", self.0)
+                } else {
+                    write!(f, "{:.2} KB", self.0 as f64 / 1024.0)
+                }
+            }
+        }
+        match self {
+            SvgSource::File(path) => f.debug_tuple("File").field(path).finish(),
+            SvgSource::Inline(data) => f
+                .debug_tuple("Inline")
+                .field(NumBytes(data.len()))
+                .finish(),
+        }
     }
 }
 
-#[derive(Clone, Default, educe::Educe)]
-#[educe(Debug, PartialEq)]
-struct SvgCacheEntry {
-    path: std::path::PathBuf,
+#[derive(Debug, Clone, Hash)]
+struct SvgParam {
+    source: SvgSource,
     color: (u8, u8, u8),
 
     width: u32,
     height: u32,
     maintain_aspect_ratio: bool,
     clipping: (u32, u32, u32, u32),
-    #[educe(Debug(ignore), PartialEq(ignore))]
-    buffer: Vec<u8>,
 }
-
-static SVG_CACHES: std::sync::LazyLock<dashmap::DashMap<i64, SvgCacheEntry>> =
-    std::sync::LazyLock::new(dashmap::DashMap::new);
 
 static FONT_DB: std::sync::LazyLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
     std::sync::LazyLock::new(|| {
@@ -133,6 +149,11 @@ struct SvgConfig {
         #[track(name = "下", range = 0..=8192, default = 0, step = 1.0)]
         clip_bottom: u32,
     },
+    #[group(name = "インライン入力", opened = false)]
+    inline_input: group! {
+        #[text(name = "SVGコード", default = "")]
+        svg_data: String,
+    },
 }
 
 impl aviutl2::filter::FilterPlugin for SvgFilter {
@@ -155,7 +176,7 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
             label: None,
             flags: aviutl2::bitflag!(aviutl2::filter::FilterPluginFlags {
                 video: true,
-                as_object: true
+                input: true
             }),
             information: format!(
                 "SVG Object, powered by resvg, written in Rust / v{version} / https://github.com/sevenc-nanashi/svg.aux2",
@@ -171,14 +192,16 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
         video: &mut aviutl2::filter::FilterProcVideo,
     ) -> aviutl2::AnyResult<()> {
         let config = config.to_struct::<SvgConfig>();
-        let Some(svg_path) = &config.svg_file else {
-            return Ok(());
+        let source = match (config.svg_data.as_str(), config.svg_file.as_ref()) {
+            (inline, _) if !inline.trim().is_empty() => SvgSource::Inline(inline.to_string()),
+            (_, Some(path)) => SvgSource::File(path.clone()),
+            _ => return Ok(()),
         };
         let color = config.color.to_rgb();
 
-        let mut cache_entry = SVG_CACHES.entry(video.object.effect_id).or_default();
-        let cache_key = SvgCacheEntry {
-            path: svg_path.clone(),
+        let debug_source = format!("{:?}", &source);
+        let cache_key = SvgParam {
+            source,
             color,
             width: config.width,
             height: config.height,
@@ -189,118 +212,114 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
                 config.clip_right,
                 config.clip_bottom,
             ),
-            buffer: Vec::new(),
         };
-        if *cache_entry.value() != cache_key {
-            tracing::info!(
-                "Rendering SVG file '{}' with color rgb({},{},{}) at size {}x{}",
-                svg_path.display(),
-                color.0,
-                color.1,
-                color.2,
-                config.width,
-                config.height
+        let cache_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            cache_key.hash(&mut hasher);
+            hasher.finish().to_string()
+        };
+        let cache_entry =
+            aviutl2::cache::get_image_cache(&aviutl2::cache::GLOBAL_CACHE_HANDLE, &cache_hash)?;
+        if let Some(cache_entry) = cache_entry {
+            tracing::debug!("Cache hit for SVG {debug_source} with hash {}", cache_hash);
+            video.set_image_data(
+                cache_entry.as_u8_slice(),
+                cache_entry.width() as _,
+                cache_entry.height() as _,
             );
-            let svg_data = std::fs::read_to_string(svg_path).map_err(|e| {
-                anyhow::anyhow!("Failed to read SVG file '{}': {}", svg_path.display(), e)
-            })?;
-            let opt = resvg::usvg::Options {
-                style_sheet: Some(format!(
-                    "* {{ color: rgb({},{},{}); }}",
-                    color.0, color.1, color.2
-                )),
-                fontdb: std::sync::Arc::clone(&FONT_DB),
-                ..Default::default()
-            };
-            let rtree = resvg::usvg::Tree::from_str(&svg_data, &opt).map_err(|e| {
+            return Ok(());
+        }
+        tracing::info!(
+            "Rendering SVG {} with color rgb({},{},{}) at size {}x{}",
+            debug_source,
+            color.0,
+            color.1,
+            color.2,
+            config.width,
+            config.height
+        );
+        let svg_data = match &cache_key.source {
+            SvgSource::File(path) => std::fs::read_to_string(path).map_err(|e| {
+                anyhow::anyhow!("Failed to read SVG file '{}': {}", path.display(), e)
+            })?,
+            SvgSource::Inline(data) => data.clone(),
+        };
+        let opt = resvg::usvg::Options {
+            style_sheet: Some(format!(
+                "* {{ color: rgb({},{},{}); }}",
+                color.0, color.1, color.2
+            )),
+            fontdb: std::sync::Arc::clone(&FONT_DB),
+            ..Default::default()
+        };
+        let rtree = resvg::usvg::Tree::from_str(&svg_data, &opt).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create usvg Tree from SVG data for source {:?}: {}",
+                cache_key.source,
+                e
+            )
+        })?;
+        let (clipped_width, clipped_height) = {
+            let size = rtree.size();
+            let clipped_width =
+                (size.width() as u32).saturating_sub(config.clip_left + config.clip_right);
+            let clipped_height =
+                (size.height() as u32).saturating_sub(config.clip_top + config.clip_bottom);
+            (clipped_width, clipped_height)
+        };
+        let (scale_x, scale_y) = if config.maintain_aspect_ratio {
+            let scale_x = config.width as f32 / clipped_width as f32;
+            let scale_y = config.height as f32 / clipped_height as f32;
+            let scale = scale_x.min(scale_y);
+            (scale, scale)
+        } else {
+            (
+                config.width as f32 / clipped_width as f32,
+                config.height as f32 / clipped_height as f32,
+            )
+        };
+        tracing::debug!(
+            "Clipped SVG size: {}x{}, scale: {}x{}",
+            clipped_width,
+            clipped_height,
+            scale_x,
+            scale_y
+        );
+        let canvas_width = (clipped_width as f32 * scale_x).ceil() as u32;
+        let canvas_height = (clipped_height as f32 * scale_y).ceil() as u32;
+        if canvas_width == 0 || canvas_height == 0 {
+            return Err(anyhow::anyhow!(
+                "Resulting SVG size is zero ({}x{})",
+                canvas_width,
+                canvas_height
+            ));
+        }
+        tracing::debug!("Canvas size: {}x{}", canvas_width, canvas_height);
+        let mut buf =
+            resvg::tiny_skia::Pixmap::new(canvas_width, canvas_height).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Failed to create SVG tree from file '{}': {}",
-                    svg_path.display(),
-                    e
-                )
-            })?;
-            let (clipped_width, clipped_height) = {
-                let size = rtree.size();
-                let clipped_width =
-                    (size.width() as u32).saturating_sub(config.clip_left + config.clip_right);
-                let clipped_height =
-                    (size.height() as u32).saturating_sub(config.clip_top + config.clip_bottom);
-                (clipped_width, clipped_height)
-            };
-            let (scale_x, scale_y) = if config.maintain_aspect_ratio {
-                let scale_x = config.width as f32 / clipped_width as f32;
-                let scale_y = config.height as f32 / clipped_height as f32;
-                let scale = scale_x.min(scale_y);
-                (scale, scale)
-            } else {
-                (
-                    config.width as f32 / clipped_width as f32,
-                    config.height as f32 / clipped_height as f32,
-                )
-            };
-            tracing::debug!(
-                "Clipped SVG size: {}x{}, scale: {}x{}",
-                clipped_width,
-                clipped_height,
-                scale_x,
-                scale_y
-            );
-            let canvas_width = (clipped_width as f32 * scale_x).ceil() as u32;
-            let canvas_height = (clipped_height as f32 * scale_y).ceil() as u32;
-            if canvas_width == 0 || canvas_height == 0 {
-                return Err(anyhow::anyhow!(
-                    "Resulting SVG size is zero ({}x{})",
+                    "Failed to create pixmap with size {}x{}",
                     canvas_width,
                     canvas_height
-                ));
-            }
-            tracing::debug!("Canvas size: {}x{}", canvas_width, canvas_height);
-            let mut buf =
-                resvg::tiny_skia::Pixmap::new(canvas_width, canvas_height).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Failed to create pixmap with size {}x{}",
-                        canvas_width,
-                        canvas_height
-                    )
-                })?;
-            let transform = resvg::tiny_skia::Transform::from_scale(scale_x, scale_y)
-                .pre_translate(-(config.clip_left as f32), -(config.clip_top as f32));
-            resvg::render(&rtree, transform, &mut buf.as_mut());
-            *cache_entry.value_mut() =
-                if config.width == buf.width() && config.height == buf.height() {
-                    SvgCacheEntry {
-                        buffer: buf.data().to_vec(),
-                        ..cache_key
-                    }
-                } else {
-                    let mut final_buf = resvg::tiny_skia::Pixmap::new(config.width, config.height)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "Failed to create final pixmap with size {}x{}",
-                                config.width,
-                                config.height
-                            )
-                        })?;
-                    final_buf.fill(resvg::tiny_skia::Color::from_rgba8(0, 0, 0, 0));
-                    let left = ((config.width as i32 - buf.width() as i32) / 2).max(0) as u32;
-                    let top = ((config.height as i32 - buf.height() as i32) / 2).max(0) as u32;
-                    final_buf.draw_pixmap(
-                        left as i32,
-                        top as i32,
-                        buf.as_ref(),
-                        &resvg::tiny_skia::PixmapPaint::default(),
-                        Default::default(),
-                        None,
-                    );
-                    SvgCacheEntry {
-                        buffer: final_buf.data().to_vec(),
-                        ..cache_key
-                    }
-                };
-        }
+                )
+            })?;
+        let transform = resvg::tiny_skia::Transform::from_scale(scale_x, scale_y)
+            .pre_translate(-(config.clip_left as f32), -(config.clip_top as f32));
+        resvg::render(&rtree, transform, &mut buf.as_mut());
 
-        let cache_entry = cache_entry.value();
-        video.set_image_data(&cache_entry.buffer, cache_entry.width, cache_entry.height);
+        let mut cache_entry = aviutl2::cache::create_image_cache(
+            &aviutl2::cache::GLOBAL_CACHE_HANDLE,
+            &cache_hash,
+            buf.width() as _,
+            buf.height() as _,
+        )?;
+        cache_entry.as_u8_slice_mut().copy_from_slice(buf.data());
+        video.set_image_data(
+            cache_entry.as_u8_slice(),
+            cache_entry.width() as _,
+            cache_entry.height() as _,
+        );
         Ok(())
     }
 }
