@@ -123,6 +123,21 @@ static FONT_DB: std::sync::LazyLock<std::sync::Arc<resvg::usvg::fontdb::Database
         std::sync::Arc::new(db)
     });
 
+fn unpremultiply_rgba(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = u16::from(pixel[3]);
+        if alpha == 0 {
+            pixel[..3].fill(0);
+            continue;
+        }
+
+        for channel in &mut pixel[..3] {
+            let straight = (u16::from(*channel) * 255 + alpha / 2) / alpha;
+            *channel = straight.min(255) as u8;
+        }
+    }
+}
+
 #[aviutl2::plugin(FilterPlugin)]
 struct SvgFilter {}
 
@@ -216,6 +231,7 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
         let cache_hash = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            "straight-alpha-v1".hash(&mut hasher);
             cache_key.hash(&mut hasher);
             hasher.finish().to_string()
         };
@@ -307,6 +323,7 @@ impl aviutl2::filter::FilterPlugin for SvgFilter {
         let transform = resvg::tiny_skia::Transform::from_scale(scale_x, scale_y)
             .pre_translate(-(config.clip_left as f32), -(config.clip_top as f32));
         resvg::render(&rtree, transform, &mut buf.as_mut());
+        unpremultiply_rgba(buf.data_mut());
 
         let mut cache_entry = aviutl2::cache::create_image_cache(
             &aviutl2::cache::GLOBAL_CACHE_HANDLE,
